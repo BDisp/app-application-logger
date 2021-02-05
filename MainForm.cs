@@ -4,6 +4,8 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.IO;
+using System.Management;
 using System.Text;
 using System.Windows.Forms;
 
@@ -13,12 +15,13 @@ namespace ApplicationLogger {
 
 		// Constants
 		private const string SETTINGS_FIELD_RUN_AT_STARTUP = "RunAtStartup";
-		private const string REGISTRY_KEY_ID = "ApplicationLogger";					// Registry app key for when it's running at startup
 		private const string CONFIG_FILE = "ApplicationLogger.cfg";
+		private const string TEMP_LOG_FILE = "tempLog";                             // Used when app restart
+		private const string TEMP_WINDOWS_RUN_AT_STARTUP_AS_ADMIN_FILE = "tempAs";  // Used when app restart
 
 		private const string LINE_DIVIDER = "\t";
 		private const string LINE_END = "\r\n";
-		private const string DATE_TIME_FORMAT = "o";								// 2008-06-15T21:15:07.0000000
+		private const string DATE_TIME_FORMAT = "o";                                // 2008-06-15T21:15:07.0000000
 
 		// Properties
 		private Timer timerCheck;
@@ -40,13 +43,15 @@ namespace ApplicationLogger {
 		private List<string> queuedLogMessages;
 
 		private string configPath;
-		private float? configIdleTime;												// In seconds
-		private float? configTimeCheckInterval;										// In seconds
+		private float? configIdleTime;                                              // In seconds
+		private float? configTimeCheckInterval;                                     // In seconds
 		private float? configMaxQueueTime;
 		private int? configMaxQueueEntries;
 
-		private string newUserProcessId;											// Temp
-		private StringBuilder lineToLog;											// Temp, used to create the line
+		private string newUserProcessId;                                            // Temp
+		private StringBuilder lineToLog;                                            // Temp, used to create the line
+		private ContextMenuStrip contextMenuStrip;
+		private readonly ListViewColumnSorterExt fileSorter;
 
 		// ================================================================================================================
 		// CONSTRUCTOR ----------------------------------------------------------------------------------------------------
@@ -54,6 +59,9 @@ namespace ApplicationLogger {
 		public MainForm() {
 			InitializeComponent();
 			initializeForm();
+
+			// Apply sorting to the listview
+			fileSorter = new ListViewColumnSorterExt(lsvLog);
 		}
 
 
@@ -87,7 +95,11 @@ namespace ApplicationLogger {
 			stop();
 
 			// If debugging, un-hook itself from startup
-			if (System.Diagnostics.Debugger.IsAttached && windowsRunAtStartup) windowsRunAtStartup = false;
+			if (System.Diagnostics.Debugger.IsAttached && windowsRunAtStartup) {
+				settingsRunAtStartup = false;
+				//windowsRunAtStartup = false;
+				applySettingsRunAtStartup();
+			}
 		}
 
 		private void onTimer(object sender, EventArgs e) {
@@ -124,7 +136,7 @@ namespace ApplicationLogger {
 			}
 
 			// Write to log if enough time passed
-			if (queuedLogMessages.Count > 0 && (DateTime.Now - lastTimeQueueWritten).TotalSeconds > configMaxQueueTime ) {
+			if (queuedLogMessages.Count > 0 && (DateTime.Now - lastTimeQueueWritten).TotalSeconds > configMaxQueueTime) {
 				commitLines();
 			}
 		}
@@ -185,6 +197,7 @@ namespace ApplicationLogger {
 				lineToLog = new StringBuilder();
 				lastFileNameSaved = "";
 				allowShow = false;
+				ckbAutoScroll.Checked = true;
 
 				// Force working folder
 				System.IO.Directory.SetCurrentDirectory(AppDomain.CurrentDomain.BaseDirectory);
@@ -201,11 +214,97 @@ namespace ApplicationLogger {
 				// Check if it needs to run at startup
 				applySettingsRunAtStartup();
 
+				// Create ListView
+				createListView();
+
+				// Create context menu for the list view and update it
+				createContextMenuStrip();
+
+				// Check if is running as administrator
+				btnRunAs.Visible = !SystemHelper.IsRunningAsAdmin();
+
+				// Check if has temp log file to log into list view
+				ImportListViewItemsFromFile(TEMP_LOG_FILE, true);
+
+				// Check if has temp file to set startup windows as admin
+				CheckSettingStartupWindowsAsAdminIsNeeded();
+
 				// Finally, start
 				start();
 
 				hasInitialized = true;
 			}
+		}
+
+		private void CheckSettingStartupWindowsAsAdminIsNeeded() {
+			if (File.Exists(TEMP_WINDOWS_RUN_AT_STARTUP_AS_ADMIN_FILE)) {
+				try {
+					windowsRunAtStartup = true;
+					File.Delete(TEMP_WINDOWS_RUN_AT_STARTUP_AS_ADMIN_FILE);
+				} catch (Exception ex) {
+				}
+			}
+		}
+
+		private void createContextMenuStrip() {
+			contextMenuStrip = new ContextMenuStrip();
+
+			contextMenuStrip.Items.Add("&Open folder in File Explorer");
+			contextMenuStrip.Items.Add("&Copy Command Line to Clipboard");
+			contextMenuStrip.Opening += ContextMenuStrip_Opening;
+			contextMenuStrip.ItemClicked += ContextMenuStrip_ItemClicked;
+
+			lsvLog.ContextMenuStrip = contextMenuStrip;
+		}
+
+		private void ContextMenuStrip_Opening(object sender, System.ComponentModel.CancelEventArgs e) {
+			updateContextMenuStrip();
+		}
+
+		private void updateContextMenuStrip() {
+			// Only enable if a item is selected
+			if (lsvLog.SelectedItems.Count > 0) {
+				contextMenuStrip.Enabled = true;
+			} else {
+				contextMenuStrip.Enabled = false;
+			}
+		}
+
+		private void ContextMenuStrip_ItemClicked(object sender, ToolStripItemClickedEventArgs e) {
+			switch (e.ClickedItem.ToString()) {
+				case "&Open folder in File Explorer":
+					OpenFolderInFileExplorer();
+					break;
+				case "&Copy Command Line to Clipboard":
+					Clipboard.SetText(lsvLog.SelectedItems[0].SubItems[6].Text);
+					break;
+				default:
+					break;
+			}
+		}
+
+		private void OpenFolderInFileExplorer() {
+			string getSelectedFileName = lsvLog.SelectedItems[0].SubItems[4].Text;
+
+			//string filePath = System.IO.Path.GetDirectoryName(getSelectedFileName);
+			if (getSelectedFileName.Length > 0 && System.IO.File.Exists(getSelectedFileName)) {
+				Process.Start("explorer.exe", $"/select, {getSelectedFileName}");
+			}
+		}
+
+		private void createListView() {
+			lsvLog.Columns.Add("Date/Time", 210, HorizontalAlignment.Left);
+			lsvLog.Columns.Add("Type", 100, HorizontalAlignment.Left);
+			lsvLog.Columns.Add("Machine", 100, HorizontalAlignment.Left);
+			lsvLog.Columns.Add("Title", 100, HorizontalAlignment.Left);
+			lsvLog.Columns.Add("Location", 300, HorizontalAlignment.Left);
+			lsvLog.Columns.Add("Subject", 150, HorizontalAlignment.Left);
+			lsvLog.Columns.Add("Command Line", 400, HorizontalAlignment.Left);
+
+			lsvLog.View = View.Details;
+			lsvLog.FullRowSelect = true;
+			lsvLog.MultiSelect = false;
+			lsvLog.ShowItemToolTips = true;
 		}
 
 		private void createContextMenu() {
@@ -284,9 +383,13 @@ namespace ApplicationLogger {
 			if (isRunning) {
 				notifyIcon.Icon = ApplicationLogger.Properties.Resources.iconNormal;
 				notifyIcon.Text = "Application Logger (started)";
+				Icon = ApplicationLogger.Properties.Resources.iconNormal;
+				Text = "Application Logger (started)";
 			} else {
 				notifyIcon.Icon = ApplicationLogger.Properties.Resources.iconStopped;
 				notifyIcon.Text = "Application Logger (stopped)";
+				this.Icon = ApplicationLogger.Properties.Resources.iconStopped;
+				Text = "Application Logger (stopped)";
 			}
 		}
 
@@ -386,20 +489,54 @@ namespace ApplicationLogger {
 				}
 			}
 
+			string commandLine;
 			try {
-				logLine("app::focus", process.ProcessName, process.MainModule.FileName, process.MainWindowTitle);
+				commandLine = GetCommandLine(process);
+			} catch (Exception) {
+				commandLine = "?";
+			}
+
+			try {
+				logLine("app::focus", process.ProcessName, process.MainModule.FileName, process.MainWindowTitle, commandLine);
 				updateText("Name: " + process.ProcessName + ", " + process.MainWindowTitle);
 			} catch (Exception exception) {
-				logLine("app::focus", process.ProcessName, "?", "?");
+				logLine("app::focus", process.ProcessName, "?", "?", commandLine);
 				updateText("Name: " + process.ProcessName + ", ?");
 			}
 		}
 
-		private void logLine(string type, bool forceCommit = false, bool usePreviousDayFileName = false, float idleTimeOffsetSeconds = 0) {
-			logLine(type, "", "", "", forceCommit, usePreviousDayFileName, idleTimeOffsetSeconds);
+		// Define an extension method for type System.Process that returns the command 
+		// line via WMI.
+		private string GetCommandLine(Process process) {
+			string cmdLine = null;
+			using (var searcher = new ManagementObjectSearcher(
+			  $"SELECT CommandLine FROM Win32_Process WHERE ProcessId = {process.Id}")) {
+				// By definition, the query returns at most 1 match, because the process 
+				// is looked up by ID (which is unique by definition).
+				using (var matchEnum = searcher.Get().GetEnumerator()) {
+					if (matchEnum.MoveNext()) // Move to the 1st item.
+					{
+						cmdLine = matchEnum.Current["CommandLine"]?.ToString();
+					}
+				}
+			}
+			if (cmdLine == null) {
+				// Not having found a command line implies 1 of 2 exceptions, which the
+				// WMI query masked:
+				// An "Access denied" exception due to lack of privileges.
+				// A "Cannot process request because the process (<pid>) has exited."
+				// exception due to the process having terminated.
+				// We provoke the same exception again simply by accessing process.MainModule.
+				var dummy = process.MainModule; // Provoke exception.
+			}
+			return cmdLine;
 		}
 
-		private void logLine(string type, string title, string location, string subject, bool forceCommit = false, bool usePreviousDayFileName = false, float idleTimeOffsetSeconds = 0) {
+		private void logLine(string type, bool forceCommit = false, bool usePreviousDayFileName = false, float idleTimeOffsetSeconds = 0) {
+			logLine(type, "", "", "", "", forceCommit, usePreviousDayFileName, idleTimeOffsetSeconds);
+		}
+
+		private void logLine(string type, string title, string location, string subject, string commandLine, bool forceCommit = false, bool usePreviousDayFileName = false, float idleTimeOffsetSeconds = 0) {
 			// Log a single line
 			DateTime now = DateTime.Now;
 
@@ -417,6 +554,11 @@ namespace ApplicationLogger {
 			lineToLog.Append(location);
 			lineToLog.Append(LINE_DIVIDER);
 			lineToLog.Append(subject);
+			lineToLog.Append(LINE_DIVIDER);
+			lineToLog.Append(commandLine);
+
+			addLineToListView(lineToLog.ToString());
+
 			lineToLog.Append(LINE_END);
 
 			//Console.Write("LOG ==> " + lineToLog.ToString());
@@ -430,6 +572,32 @@ namespace ApplicationLogger {
 				} else {
 					commitLines();
 				}
+			}
+		}
+
+		private void addLineToListView(string line) {
+			var splitedLine = line.Split(LINE_DIVIDER.ToCharArray());
+			ListViewItem row = new ListViewItem();
+			foreach (var item in splitedLine) {
+				if (string.IsNullOrEmpty(row.Text)) {
+					row.Text = item.ToString();
+				} else {
+					row.SubItems.Add(item.ToString());
+				}
+			}
+			lsvLog.Items.Add(row);
+			if (lsvLog.SelectedItems.Count == 0 && ckbAutoScroll.Checked) {
+				ScrollToEndListView();
+			} else {
+				if (ckbAutoScroll.Checked) {
+					ckbAutoScroll.Checked = false;
+				}
+			}
+		}
+
+		private void ScrollToEndListView() {
+			if (lsvLog.Items.Count > 0) {
+				lsvLog.Items[lsvLog.Items.Count - 1].EnsureVisible();
 			}
 		}
 
@@ -488,6 +656,7 @@ namespace ApplicationLogger {
 			allowShow = true;
 			Show();
 			WindowState = FormWindowState.Normal;
+			Activate();
 		}
 
 		private void exit() {
@@ -513,17 +682,54 @@ namespace ApplicationLogger {
 		private bool windowsRunAtStartup {
 			// Whether it's actually set to run at startup or not
 			get {
-				return getStartupRegistryKey().GetValue(REGISTRY_KEY_ID) != null;
+				return getStartupRegistryKey().GetValue(SystemHelper.REGISTRY_KEY_ID) != null ||
+					SystemHelper.ScheduledTaskParse($"/Query /TN {SystemHelper.REGISTRY_KEY_ID}", SystemHelper.REGISTRY_KEY_ID);
 			}
 			set {
 				if (value) {
 					// Add
-					getStartupRegistryKey(true).SetValue(REGISTRY_KEY_ID, Application.ExecutablePath.ToString());
+					if (hasInitialized) {
+						if (!SystemHelper.IsRunningAsAdmin()) {
+							if (MessageBox.Show("Do you want to run at startup as administrator?", "Startup", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1) == DialogResult.Yes) {
+								if (RunAsAdmin()) {
+									using (File.Create(TEMP_WINDOWS_RUN_AT_STARTUP_AS_ADMIN_FILE)) {
+										return;
+									}
+								}
+							}
+						}
+
+					}
+
+					if (SystemHelper.IsRunningAsAdmin()) {
+						if (getStartupRegistryKey().GetValue(SystemHelper.REGISTRY_KEY_ID) != null) {
+							getStartupRegistryKey(true).DeleteValue(SystemHelper.REGISTRY_KEY_ID, false);
+						}
+
+						//string args = $"/Create /f /tn {SystemHelper.REGISTRY_KEY_ID} /tr {Application.ExecutablePath.ToString()} /sc onlogon /rl highest";
+						//Process.Start("schtasks", args);
+
+						SystemHelper.ScheduledTaskParse($"/Create /f /tn {SystemHelper.REGISTRY_KEY_ID} /tr {Application.ExecutablePath.ToString()} /sc onlogon /rl highest",
+							"SUCCESS");
+					} else {
+						getStartupRegistryKey(true).SetValue(SystemHelper.REGISTRY_KEY_ID, Application.ExecutablePath.ToString());
+					}
 					//Console.WriteLine("RUN AT STARTUP SET AS => TRUE");
 				} else {
 					// Remove
-					getStartupRegistryKey(true).DeleteValue(REGISTRY_KEY_ID, false);
+					getStartupRegistryKey(true).DeleteValue(SystemHelper.REGISTRY_KEY_ID, false);
 					//Console.WriteLine("RUN AT STARTUP SET AS => FALSE");
+
+					SystemHelper.ScheduledTaskParse($"/Delete /F /TN {SystemHelper.REGISTRY_KEY_ID}", "SUCCESS");
+					//string args = $"/Delete /f /tn {SystemHelper.REGISTRY_KEY_ID}";
+					//Process.Start("schtasks", args);
+					//string error = p.StandardError.ReadToEnd();
+					//p.WaitForExit();
+
+					//if (!string.IsNullOrEmpty(error))
+					//{
+
+					//}
 				}
 			}
 		}
@@ -566,6 +772,91 @@ namespace ApplicationLogger {
 			}
 
 			return (pathOnly.Length > 0 ? pathOnly + "\\" : "") + fileOnly;
+		}
+
+		private void BtnClearLog_Click(object sender, EventArgs e) {
+			lsvLog.Items.Clear();
+		}
+
+		private void CkbAutoScroll_CheckedChanged(object sender, EventArgs e) {
+			if (ckbAutoScroll.Checked) {
+				if (lsvLog.SelectedItems.Count > 0) {
+					lsvLog.SelectedItems[0].Selected = false;
+				}
+				ScrollToEndListView();
+			}
+		}
+
+		private void btnRunAs_Click(object sender, EventArgs e) {
+			RunAsAdmin();
+		}
+
+		private bool RunAsAdmin() {
+			try {
+				ProcessStartInfo elevated = new ProcessStartInfo(System.Reflection.Assembly.GetEntryAssembly().Location) {
+					UseShellExecute = true,
+					Verb = "runas"
+				};
+
+				// Restart the program
+				using (Process process = Process.Start(elevated)) {
+					commitLines();
+
+					ExportListViewItemsToFile(TEMP_LOG_FILE);
+
+					exit();
+
+					//close this one
+					//Process.GetCurrentProcess().Kill();
+
+					return true;
+
+				}
+			} catch (Exception ex) {
+				File.Delete(TEMP_LOG_FILE);
+				return false;
+			}
+
+		}
+
+		private void ExportListViewItemsToFile(string fileName) {
+			StringBuilder builder = new StringBuilder();
+
+			for (int i = 0; i < lsvLog.Items.Count; i++) {
+				for (int j = 0; j < lsvLog.Items[i].SubItems.Count; j++) {
+					builder.Append(lsvLog.Items[i].SubItems[j].Text);
+					if (j < lsvLog.Items[i].SubItems.Count) {
+						builder.Append(LINE_DIVIDER);
+					}
+				}
+				if (i < lsvLog.Items.Count) {
+					builder.Append(LINE_END);
+				}
+			}
+
+			try {
+				File.WriteAllText(fileName, builder.ToString());
+			} catch (Exception) {
+			}
+		}
+
+		private void ImportListViewItemsFromFile(string fileName, bool deleteFile) {
+			try {
+				var fileLines = File.ReadAllLines(fileName);
+
+				for (int i = 0; i < fileLines.Length; i++) {
+					addLineToListView(fileLines[i]);
+				}
+				if (deleteFile) {
+					File.Delete(fileName);
+				}
+				showForm();
+			} catch (Exception ex) {
+			}
+		}
+
+		private void LsvLog_DoubleClick(object sender, EventArgs e) {
+			OpenFolderInFileExplorer();
 		}
 	}
 }
