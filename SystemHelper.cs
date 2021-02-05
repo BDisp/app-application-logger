@@ -17,7 +17,7 @@ public class SystemHelper {
 	[DllImport("user32.dll", CharSet=CharSet.Auto)]
 	public static extern bool IsWindowVisible(IntPtr hWnd);
 
-	[DllImport("user32.dll", CharSet=CharSet.Auto, ExactSpelling = true)]
+	[DllImport("user32.dll", CharSet=CharSet.Auto, ExactSpelling=true)]
 	public static extern IntPtr GetForegroundWindow();
 
 	public static uint GetIdleTime() {
